@@ -29,6 +29,9 @@ add_library(deluge_spec STATIC
 ../../src/deluge/hid/display/starfield.cpp
 ../../src/deluge/hid/display/rainfall.cpp
 ../../src/deluge/dsp/reverb/freeverb/freeverb.cpp
+../../src/deluge/dsp/waveguide/karplus_string.cpp
+../../src/deluge/dsp/waveguide/karplus_string_group.cpp
+../../src/deluge/dsp/waveguide/string_mix.cpp
 ../32bit_unit_tests/mocks/mock_display.cpp
 ../32bit_unit_tests/mocks/mock_print.cpp
 )
@@ -83,6 +86,14 @@ set_target_properties(StarfieldPreview PROPERTIES
 add_executable(RainfallPreview rainfall_preview.cpp)
 target_link_libraries(RainfallPreview PRIVATE deluge_spec)
 set_target_properties(RainfallPreview PROPERTIES
+  CXX_STANDARD 23
+  CXX_STANDARD_REQUIRED YES
+)
+
+# Listening harness for the STRING oscillator, on the same terms as StarfieldPreview above.
+add_executable(StringPreview string_preview.cpp)
+target_link_libraries(StringPreview PRIVATE deluge_spec)
+set_target_properties(StringPreview PROPERTIES
   CXX_STANDARD 23
   CXX_STANDARD_REQUIRED YES
 )

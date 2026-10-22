@@ -23,6 +23,9 @@
 #include "dsp/oscillators/sine_osc.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "dsp/util.hpp"
+#include "dsp/waveguide/karplus_string.hpp"
+#include "dsp/waveguide/string_mix.hpp"
+#include "dsp/waveguide/string_param_mapping.hpp"
 #include "gui/waveform/waveform_renderer.h"
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
@@ -31,6 +34,7 @@
 #include "model/sample/sample.h"
 #include "model/sample/sample_cache.h"
 #include "model/sample/sample_holder_for_voice.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "model/voice/voice_sample.h"
 #include "modulation/params/param_set.h"
@@ -50,6 +54,7 @@
 #include "dsp/oscillators/basic_waves.h"
 #include "dsp/oscillators/oscillator.h"
 #include "util/misc.h"
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -63,6 +68,25 @@ namespace params = deluge::modulation::params;
 
 PLACE_INTERNAL_FRUNK int32_t spareRenderingBuffer[4][SSI_TX_BUFFER_NUM_SAMPLES]
     __attribute__((aligned(CACHE_LINE_SIZE)));
+
+// STRING oscillator scratch, see renderStringSource(): the exciter (OSC1 + noise, mono), room to fold a stereo
+// OSC1 down to mono, and one unison part's string output. The exciter is two blocks long although only the first
+// is used: a live-input pitch shifter's channel count is fixed when it's created, so if the stereo input is unplugged
+// mid-note, a stale two-channel shifter may still write an interleaved block into it.
+PLACE_INTERNAL_FRUNK int32_t stringExciterBuffer[2 * SSI_TX_BUFFER_NUM_SAMPLES];
+PLACE_INTERNAL_FRUNK int32_t stringStereoScratch[2 * SSI_TX_BUFFER_NUM_SAMPLES];
+PLACE_INTERNAL_FRUNK int32_t stringOutputBuffer[SSI_TX_BUFFER_NUM_SAMPLES];
+// The exciter after the voice's pluck-position comb, shared by its unison strings
+PLACE_INTERNAL_FRUNK int32_t stringPluckBuffer[SSI_TX_BUFFER_NUM_SAMPLES];
+// Up to KarplusString::kGroupSize strings rendered together, interleaved
+PLACE_INTERNAL_FRUNK int32_t
+    stringGroupBuffer[deluge::dsp::waveguide::KarplusString::kGroupSize * SSI_TX_BUFFER_NUM_SAMPLES];
+static_assert(SSI_TX_BUFFER_NUM_SAMPLES <= deluge::dsp::waveguide::KarplusString::kMaxBlock,
+              "renderStringSource renders a whole block with one KarplusString::renderPlucked call");
+
+/// ENV2 gain on the STRING exciter below which OSC1 and noise are not rendered (2^15 / 2^31, about -96 dB)
+constexpr q31_t kStringExciterGateGain = 1 << 15;
+static_assert(kSampleRate == 44100, "KarplusString assumes 44.1 kHz");
 
 // Hopefully I could make this use the spareRenderingBuffer instead...
 
@@ -96,10 +120,10 @@ void Voice::setAsUnassigned(ModelStackWithSoundFlags* modelStack, bool deletingS
 	}
 }
 
-void Voice::unassignStuff(bool deletingSong) {
+void Voice::unassignStuff(bool deletingSong, bool keepStrings) {
 	for (int32_t s = 0; s < kNumSources; s++) {
 		for (int32_t u = 0; u < this->sound.numUnison; u++) {
-			unisonParts[u].sources[s].unassign(deletingSong);
+			unisonParts[u].sources[s].unassign(deletingSong, keepStrings);
 		}
 	}
 }
@@ -167,8 +191,14 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 		sourceValues[util::to_underlying(PatchSource::X) + m] = combineExpressionValues(sound, m);
 	}
 
+	if (sound.sources[1].oscType == OscType::STRING) {
+		stringExciter.setVelocity(deluge::dsp::waveguide::velocityToUnit(velocity));
+	}
+
 	if (resetEnvelopes) {
 		sourceAmplitudesLastTime.fill(0);
+		stringExciterGainLastTime = 0;
+		stringExciter.reset();
 		modulatorAmplitudeLastTime.fill(0);
 		overallOscAmplitudeLastTime = 0;
 		doneFirstRender = false;
@@ -733,9 +763,12 @@ uint32_t Voice::getLocalLFOPhaseIncrement(LFO_ID lfoId, deluge::modulation::para
 		noteOff(modelStack);
 	}
 
+	// A STRING oscillator's exciter is gated by ENV2 even if nothing is patched to it
+	const bool stringOsc = rendersStringOsc(sound);
+
 	// Do envelopes - if they're patched to something (always do the first one though)
 	for (int32_t e = 0; e < kNumEnvelopes; e++) {
-		if (e == 0
+		if (e == 0 || (e == 1 && stringOsc)
 		    || (paramManager->getPatchCableSet()->sourcesPatchedToAnything[GLOBALITY_LOCAL]
 		        & (1 << (util::to_underlying(PatchSource::ENVELOPE_0) + e)))) {
 			int32_t old = sourceValues[util::to_underlying(PatchSource::ENVELOPE_0) + e];
@@ -1130,9 +1163,18 @@ skipAutoRelease: {}
 
 	int32_t const* const oscBufferEnd = oscBuffer + numSamples * channels;
 
+	// While ENV2 holds a STRING exciter shut for the whole block, OSC1 and noise would only be multiplied by
+	// (almost) zero, so they aren't rendered at all. A sample on OSC1 pauses rather than playing on silently.
+	const q31_t stringExciterGain =
+	    stringOsc ? deluge::dsp::waveguide::envelopeToGain(sourceValues[util::to_underlying(PatchSource::ENVELOPE_1)])
+	              : 0;
+	const bool stringExciterGated =
+	    stringOsc && stringExciterGain < kStringExciterGateGain && stringExciterGainLastTime < kStringExciterGateGain;
+
 	// If any noise, do that. By cutting a corner here, we do it just once for all "unison", rather than for each
 	// unison. Increasing number of unison cuts the volume of the oscillators
-	if (paramFinalValues[params::LOCAL_NOISE_VOLUME] != 0 && synthMode != SynthMode::FM) [[unlikely]] {
+	if (paramFinalValues[params::LOCAL_NOISE_VOLUME] != 0 && synthMode != SynthMode::FM && !stringExciterGated)
+	    [[unlikely]] {
 
 		// This was >>2, but because I had a bug in V2.0.x which made noise too loud if filter on,
 		// I'm now making this louder to compensate and remain consistent by going just >>1.
@@ -1146,18 +1188,28 @@ skipAutoRelease: {}
 		// Perform the same limiting that we do above for the oscillators
 		int32_t noiseAmplitude = std::min(n, (int32_t)268435455) >> 2;
 
-		int32_t* __restrict__ thisSample = oscBuffer;
+		// With a STRING oscillator, noise is part of the exciter rather than the dry mix
+		int32_t* __restrict__ thisSample = stringOsc ? stringExciterBuffer : oscBuffer;
+		int32_t const* const noiseEnd = stringOsc ? stringExciterBuffer + numSamples : oscBufferEnd;
 		do {
 			*thisSample = multiply_32x32_rshift32(getNoise(), noiseAmplitude);
 			thisSample++;
-		} while (thisSample != oscBufferEnd);
+		} while (thisSample != noiseEnd);
 
-		anythingInOscBuffer = true;
+		if (stringOsc) {
+			memset(oscBuffer, 0, channels * numSamples * sizeof(int32_t));
+		}
+		else {
+			anythingInOscBuffer = true;
+		}
 	}
 
 	// Otherwise, clear the buffer
 	else {
 		memset(oscBuffer, 0, channels * numSamples * sizeof(int32_t));
+		if (stringOsc) {
+			memset(stringExciterBuffer, 0, numSamples * sizeof(int32_t));
+		}
 	}
 
 	// Even if first rendering into a local Voice buffer, we'll very often still just do panning at the Sound level
@@ -1178,78 +1230,138 @@ skipAutoRelease: {}
 
 		uint32_t oscSyncPhaseIncrement[kMaxNumVoicesUnison];
 
-		// First, render any mono sources, and note whether there are any stereo ones
-		for (int32_t s = 0; s < kNumSources; s++) {
-
-			uint32_t* getPhaseIncrements = nullptr;
-			bool getOutAfterGettingPhaseIncrements = false;
-
-			// If we're doing osc sync and this is osc A...
-			if ((s == 0) && doingOscSync) {
-				getPhaseIncrements = oscSyncPhaseIncrement;
-			}
-
-			// This this source isn't active...
-			if (!sound.isSourceActiveCurrently(s, paramManager)) {
-
-				// If we're doing osc sync...
-				if (getPhaseIncrements) {
-					getOutAfterGettingPhaseIncrements = true;
-
-					// Otherwise, skip it
+		if (stringOsc) {
+			namespace waveguide = deluge::dsp::waveguide;
+			// OSC1 is the exciter and isn't heard dry. Render it once for the voice; every unison part's string
+			// gets the same excitation
+			if (!stringExciterGated && sound.isSourceActiveCurrently(0, paramManager)) {
+				// OSC1 renders one unison part, not one per part: every string gets the same exciter anyway, and over
+				// a short pluck the detuned copies would be near-identical. Unison already scales each part by
+				// 1/sqrt(N), and N copies with random start phases sum to about sqrt(N) times one, so restore that.
+				const float unisonGain = std::sqrt(static_cast<float>(sound.numUnison));
+				const int32_t exciterAmplitude = static_cast<int32_t>(sourceAmplitudesNow[0] * unisonGain);
+				const int32_t exciterAmplitudeIncrement =
+				    static_cast<int32_t>(sourceAmplitudeIncrements[0] * unisonGain);
+				AudioFileHolder* holder = guides[0].audioFileHolder;
+				const OscType exciterType = sound.sources[0].oscType;
+				// Sources that write an interleaved stereo layout when rendered with stereoBuffer = true. A live
+				// stereo input is included so its pitch shifter can't write two channels into the mono exciter.
+				const bool stereoExciter = (exciterType == OscType::SAMPLE && holder != nullptr
+				                            && holder->audioFile != nullptr && holder->audioFile->numChannels == 2)
+				                           || (exciterType == OscType::INPUT_STEREO
+				                               && (AudioEngine::micPluggedIn || AudioEngine::lineInPluggedIn));
+				if (stereoExciter) {
+					// Stereo sources always render interleaved: render to scratch, then fold to mono
+					memset(stringStereoScratch, 0, 2 * numSamples * sizeof(int32_t));
+					renderBasicSource(sound, paramManager, 0, stringStereoScratch, numSamples, true, exciterAmplitude,
+					                  &unisonPartBecameInactive, overallPitchAdjust, false, oscSyncPos,
+					                  oscSyncPhaseIncrement, exciterAmplitudeIncrement, nullptr, false,
+					                  sourceWaveIndexIncrements[0], 1);
+					for (int32_t i = 0; i < numSamples; i++) {
+						stringExciterBuffer[i] +=
+						    (stringStereoScratch[i << 1] >> 1) + (stringStereoScratch[(i << 1) + 1] >> 1);
+					}
 				}
 				else {
-					continue;
+					renderBasicSource(sound, paramManager, 0, stringExciterBuffer, numSamples, false, exciterAmplitude,
+					                  &unisonPartBecameInactive, overallPitchAdjust, false, oscSyncPos,
+					                  oscSyncPhaseIncrement, exciterAmplitudeIncrement, nullptr, false,
+					                  sourceWaveIndexIncrements[0], 1);
 				}
 			}
 
-			if (!sound.sources[s].renderInStereo(&sound, (SampleHolder*)guides[s].audioFileHolder)) {
-				renderBasicSource(sound, paramManager, s, oscBuffer, numSamples, false, sourceAmplitudesNow[s],
-				                  &unisonPartBecameInactive, overallPitchAdjust, (s == 1) && doingOscSync, oscSyncPos,
-				                  oscSyncPhaseIncrement, sourceAmplitudeIncrements[s], getPhaseIncrements,
-				                  getOutAfterGettingPhaseIncrements, sourceWaveIndexIncrements[s]);
-				anythingInOscBuffer = true;
+			// ENV2 gates the exciter
+			// (when gated, the buffer is already all zeros)
+			if (!stringExciterGated) {
+				waveguide::applyGainRamp({stringExciterBuffer, static_cast<size_t>(numSamples)},
+				                         stringExciterGainLastTime, stringExciterGain);
 			}
-			else {
-				sourcesToRenderInStereo |= (1 << s);
-			}
+			stringExciterGainLastTime = stringExciterGain;
+
+			// Condition once for all unison parts. When the exciter has gone silent, the strings skip their exciter
+			// work entirely (stringStereoScratch is free again once OSC1 has been folded to mono)
+			const bool excited = stringExciter.process({stringExciterBuffer, static_cast<size_t>(numSamples)},
+			                                           {stringStereoScratch, static_cast<size_t>(numSamples)});
+			renderStringSource(sound, excited ? stringStereoScratch : nullptr, oscBuffer, numSamples, stereoUnison,
+			                   sourceAmplitudesNow[1], sourceAmplitudeIncrements[1], overallPitchAdjust);
+			anythingInOscBuffer = true;
+			didStereoTempBuffer = stereoUnison;
 		}
-
-		// If any sources need rendering in stereo
-		if (sourcesToRenderInStereo) {
-
-			// If we've already got something mono in the buffer, copy that to the right-channel buffer
-			if (anythingInOscBuffer) {
-				for (int32_t i = numSamples - 1; i >= 0; i--) {
-					oscBuffer[(i << 1) + 1] = oscBuffer[i];
-					oscBuffer[(i << 1)] = oscBuffer[i];
-				}
-			}
-
-			// Otherwise, make it blank
-			else {
-				memset(&oscBuffer[numSamples], 0, numSamples * sizeof(int32_t));
-			}
-
-			// Render each source that's stereo. Osc sync must still be applied here: with stereo unison spread, both
-			// sources get deferred into this path (see Source::renderInStereo()), so we have to capture osc A's phase
-			// increments and sync osc B to them just like the mono path above does.
+		else {
+			// First, render any mono sources, and note whether there are any stereo ones
 			for (int32_t s = 0; s < kNumSources; s++) {
-				if (sourcesToRenderInStereo & (1 << s)) {
 
-					uint32_t* getPhaseIncrements = ((s == 0) && doingOscSync) ? oscSyncPhaseIncrement : nullptr;
-					bool getOutAfterGettingPhaseIncrements =
-					    getPhaseIncrements && !sound.isSourceActiveCurrently(s, paramManager);
+				uint32_t* getPhaseIncrements = nullptr;
+				bool getOutAfterGettingPhaseIncrements = false;
 
-					renderBasicSource(sound, paramManager, s, oscBuffer, numSamples, true, sourceAmplitudesNow[s],
+				// If we're doing osc sync and this is osc A...
+				if ((s == 0) && doingOscSync) {
+					getPhaseIncrements = oscSyncPhaseIncrement;
+				}
+
+				// This this source isn't active...
+				if (!sound.isSourceActiveCurrently(s, paramManager)) {
+
+					// If we're doing osc sync...
+					if (getPhaseIncrements) {
+						getOutAfterGettingPhaseIncrements = true;
+
+						// Otherwise, skip it
+					}
+					else {
+						continue;
+					}
+				}
+
+				if (!sound.sources[s].renderInStereo(&sound, (SampleHolder*)guides[s].audioFileHolder)) {
+					renderBasicSource(sound, paramManager, s, oscBuffer, numSamples, false, sourceAmplitudesNow[s],
 					                  &unisonPartBecameInactive, overallPitchAdjust, (s == 1) && doingOscSync,
 					                  oscSyncPos, oscSyncPhaseIncrement, sourceAmplitudeIncrements[s],
 					                  getPhaseIncrements, getOutAfterGettingPhaseIncrements,
 					                  sourceWaveIndexIncrements[s]);
+					anythingInOscBuffer = true;
+				}
+				else {
+					sourcesToRenderInStereo |= (1 << s);
 				}
 			}
 
-			didStereoTempBuffer = true;
+			// If any sources need rendering in stereo
+			if (sourcesToRenderInStereo) {
+
+				// If we've already got something mono in the buffer, copy that to the right-channel buffer
+				if (anythingInOscBuffer) {
+					for (int32_t i = numSamples - 1; i >= 0; i--) {
+						oscBuffer[(i << 1) + 1] = oscBuffer[i];
+						oscBuffer[(i << 1)] = oscBuffer[i];
+					}
+				}
+
+				// Otherwise, make it blank
+				else {
+					memset(&oscBuffer[numSamples], 0, numSamples * sizeof(int32_t));
+				}
+
+				// Render each source that's stereo. Osc sync must still be applied here: with stereo unison spread,
+				// both sources get deferred into this path (see Source::renderInStereo()), so we have to capture osc
+				// A's phase increments and sync osc B to them just like the mono path above does.
+				for (int32_t s = 0; s < kNumSources; s++) {
+					if (sourcesToRenderInStereo & (1 << s)) {
+
+						uint32_t* getPhaseIncrements = ((s == 0) && doingOscSync) ? oscSyncPhaseIncrement : nullptr;
+						bool getOutAfterGettingPhaseIncrements =
+						    getPhaseIncrements && !sound.isSourceActiveCurrently(s, paramManager);
+
+						renderBasicSource(sound, paramManager, s, oscBuffer, numSamples, true, sourceAmplitudesNow[s],
+						                  &unisonPartBecameInactive, overallPitchAdjust, (s == 1) && doingOscSync,
+						                  oscSyncPos, oscSyncPhaseIncrement, sourceAmplitudeIncrements[s],
+						                  getPhaseIncrements, getOutAfterGettingPhaseIncrements,
+						                  sourceWaveIndexIncrements[s]);
+					}
+				}
+
+				didStereoTempBuffer = true;
+			}
 		}
 
 		// If any unison part became inactive (for either source), and no noise-source, then it might be time to
@@ -1707,6 +1819,93 @@ bool Voice::areAllUnisonPartsInactive(ModelStackWithSoundFlags& modelStack) cons
 	return false;
 }
 
+bool Voice::rendersStringOsc(const Sound& sound) {
+	return sound.synthMode == SynthMode::SUBTRACTIVE && sound.sources[1].oscType == OscType::STRING
+	       && runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::PhysicalModellingOscillators);
+}
+
+void Voice::renderStringSource(Sound& sound, const int32_t* conditionedExciter, int32_t* oscBuffer, int32_t numSamples,
+                               bool stereoUnison, int32_t sourceAmplitude, int32_t amplitudeIncrement,
+                               int32_t overallPitchAdjust) {
+	namespace waveguide = deluge::dsp::waveguide;
+	const float sustain = waveguide::feedbackToUnit(paramFinalValues[params::LOCAL_CARRIER_1_FEEDBACK]);
+	const float brightness = waveguide::waveIndexToUnit(paramFinalValues[params::LOCAL_OSC_B_WAVE_INDEX]);
+	const float pluck = waveguide::pulseWidthToUnit(paramFinalValues[params::LOCAL_OSC_B_PHASE_WIDTH]);
+	// Empty when the exciter is silent
+	const std::span<const q31_t> excitation =
+	    conditionedExciter != nullptr ? std::span<const q31_t>{conditionedExciter, static_cast<size_t>(numSamples)}
+	                                  : std::span<const q31_t>{};
+	const size_t n = static_cast<size_t>(numSamples);
+	// The pluck-position comb runs once per voice, in its first string, and the result excites every unison string:
+	// they are only cents apart, and the comb's notches needn't follow that. The first string with a string allocated
+	// stays the same for the whole note, so the comb's state carries on from block to block.
+	std::span<const q31_t> plucked{};
+	bool combDone = false;
+	// The strings to render this block, and their unison parts
+	waveguide::KarplusString* strings[kMaxNumVoicesUnison];
+	int32_t stringParts[kMaxNumVoicesUnison];
+	size_t numStrings = 0;
+
+	for (int32_t u = 0; u < sound.numUnison; u++) {
+		VoiceUnisonPartSource& part = unisonParts[u].sources[1];
+		if (!part.active || part.karplusString == nullptr) {
+			continue;
+		}
+		uint32_t phaseIncrement = part.phaseIncrementStoredValue;
+		// False above the 10 kHz ceiling
+		const bool pitched = adjustPitch(phaseIncrement, overallPitchAdjust)
+		                     && adjustPitch(phaseIncrement, paramFinalValues[params::LOCAL_OSC_B_PITCH_ADJUST])
+		                     && part.karplusString->setParams({phaseIncrement, sustain, brightness, pluck});
+		if (!combDone) {
+			// Even when this string is above the ceiling, so the comb's state stays with it
+			combDone = true;
+			if (part.karplusString->pluck(excitation, {stringPluckBuffer, n})) {
+				plucked = {stringPluckBuffer, n};
+			}
+		}
+		if (pitched) {
+			strings[numStrings] = part.karplusString;
+			stringParts[numStrings] = u;
+			numStrings++;
+		}
+	}
+
+	// Pan gains for each string rendered, when the unison parts are spread across the stereo field
+	int32_t panLeft[kMaxNumVoicesUnison];
+	int32_t panRight[kMaxNumVoicesUnison];
+	if (stereoUnison) {
+		for (size_t k = 0; k < numStrings; k++) {
+			shouldDoPanning(sound.unisonPan[stringParts[k]], &panLeft[k], &panRight[k]);
+		}
+	}
+	// Mixes `count` strings, whose output is at `in` (`stride` apart), starting from string `first`
+	auto mix = [&](const q31_t* in, size_t stride, size_t count, size_t first) {
+		waveguide::mixStrings({in, stride, count, n, sourceAmplitude, amplitudeIncrement,
+		                       stereoUnison ? &panLeft[first] : nullptr, stereoUnison ? &panRight[first] : nullptr},
+		                      oscBuffer);
+	};
+
+	// Up to four strings at a time on NEON lanes (they render identically to one at a time)
+	constexpr size_t kGroupSize = waveguide::KarplusString::kGroupSize;
+	for (size_t first = 0; first < numStrings; first += kGroupSize) {
+		const size_t count = std::min(kGroupSize, numStrings - first);
+		// A lone string is cheaper rendered on its own; strings whose delay lines have drifted apart (one spent
+		// blocks above the pitch ceiling) can't share lanes
+		const bool grouped = count > 1
+		                     && waveguide::KarplusString::renderPluckedGroup({&strings[first], count}, plucked,
+		                                                                     {stringGroupBuffer, n * kGroupSize});
+		if (grouped) {
+			mix(stringGroupBuffer, kGroupSize, count, first);
+		}
+		else {
+			for (size_t k = 0; k < count; k++) {
+				strings[first + k]->renderPlucked(plucked, {stringOutputBuffer, n});
+				mix(stringOutputBuffer, 1, 1, first + k);
+			}
+		}
+	}
+}
+
 // Returns false if it takes us above 22.05kHz, in which case it doesn't return a valid value
 bool Voice::adjustPitch(uint32_t& phaseIncrement, int32_t adjustment) {
 	if (adjustment != kMaxSampleValue) {
@@ -1962,12 +2161,13 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
                               int32_t overallPitchAdjust, bool doOscSync, uint32_t* __restrict__ oscSyncPos,
                               uint32_t* __restrict__ oscSyncPhaseIncrements, int32_t amplitudeIncrement,
                               uint32_t* __restrict__ getPhaseIncrements, bool getOutAfterPhaseIncrements,
-                              int32_t waveIndexIncrement) {
+                              int32_t waveIndexIncrement, int32_t numUnisonPartsToRender) {
 
 	GeneralMemoryAllocator::get().checkStack("Voice::renderBasicSource");
 
-	// For each unison part
-	for (int32_t u = 0; u < sound.numUnison; u++) {
+	// For each unison part (or only the first numUnisonPartsToRender, when given)
+	const int32_t numParts = (numUnisonPartsToRender < 0) ? sound.numUnison : numUnisonPartsToRender;
+	for (int32_t u = 0; u < numParts; u++) {
 
 		VoiceUnisonPartSource* voiceUnisonPartSource = &unisonParts[u].sources[s];
 
@@ -2446,6 +2646,11 @@ dontUseCache: {}
 			}
 
 			// Or regular wave
+		}
+		else if (sound.sources[s].oscType == OscType::STRING) {
+			// Rendered by renderStringSource(); reaching here means the physical-modelling feature is off,
+			// so the oscillator is silent
+			continue;
 		}
 		else [[likely]] {
 			uint32_t oscSyncPosThisUnison;

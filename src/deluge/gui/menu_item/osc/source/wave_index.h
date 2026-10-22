@@ -16,6 +16,7 @@
  */
 #pragma once
 #include "gui/menu_item/formatted_title.h"
+#include "gui/menu_item/osc/string_osc.h"
 #include "gui/menu_item/source/patched_param.h"
 #include "processing/sound/sound.h"
 
@@ -25,11 +26,21 @@ public:
 	WaveIndex(l10n::String name, l10n::String title_format_str, int32_t newP, uint8_t source_id)
 	    : PatchedParam(name, newP, source_id), FormattedTitle(title_format_str, source_id + 1) {}
 
-	[[nodiscard]] std::string_view getTitle() const override { return FormattedTitle::title(); }
+	[[nodiscard]] std::string_view getTitle() const override {
+		return isEditingStringOsc(source_id_) ? l10n::getView(l10n::String::STRING_FOR_STRING_BRIGHTNESS)
+		                                      : FormattedTitle::title();
+	}
+	[[nodiscard]] std::string_view getName() const override {
+		return isEditingStringOsc(source_id_) ? l10n::getView(l10n::String::STRING_FOR_STRING_BRIGHTNESS)
+		                                      : menu_item::source::PatchedParam::getName();
+	}
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) const override {
 		const auto sound = static_cast<Sound*>(modControllable);
 		auto& source = sound->sources[source_id_];
+		if (isStringOsc(*sound, source_id_)) {
+			return true;
+		}
 		return sound->getSynthMode() != SynthMode::FM && source.oscType == OscType::WAVETABLE
 		       && source.hasAtLeastOneAudioFileLoaded();
 	}

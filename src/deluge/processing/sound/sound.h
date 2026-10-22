@@ -172,6 +172,7 @@ public:
 	virtual ArpeggiatorSettings* getArpSettings(InstrumentClip* clip = nullptr) = 0;
 	virtual void setSkippingRendering(bool newSkipping);
 
+	bool isSound() const override { return true; }
 	ModFXType getModFXType() override;
 	bool setModFXType(ModFXType newType) final;
 

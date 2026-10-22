@@ -1402,6 +1402,11 @@ PatchCableAcceptance Sound::maySourcePatchToParam(PatchSource s, uint8_t p, Para
 		                                                                      : PatchCableAcceptance::EDITABLE;
 
 	case params::LOCAL_CARRIER_1_FEEDBACK:
+		// Sustain of the STRING oscillator on OSC2 reuses this param in Subtractive
+		if (synthMode == SynthMode::SUBTRACTIVE && sources[1].oscType == OscType::STRING) {
+			// Unlike FM feedback, Sustain at its minimum still sounds (shortest decay), so cables apply from 0 up
+			return isSourceActiveEver(1, paramManager) ? PatchCableAcceptance::ALLOWED : PatchCableAcceptance::EDITABLE;
+		}
 		if (synthMode != SynthMode::FM) {
 			return PatchCableAcceptance::DISALLOWED;
 		}
@@ -1639,7 +1644,7 @@ void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t 
 					it = voices_.erase(it);
 					continue; // `it` increment happened on the line above, immediately continue the loop
 				}
-				voice->unassignStuff(false);
+				voice->unassignStuff(false, true); // Keep STRING oscillators ringing into the next note
 				voiceToReuse = &voice;
 			}
 			it++;
@@ -2125,6 +2130,9 @@ bool Sound::renderingOscillatorSyncCurrently(ParamManagerForTimeline* paramManag
 	if (!oscillatorSync) {
 		return false;
 	}
+	if (sources[1].oscType == OscType::STRING) {
+		return false;
+	}
 	if (synthMode == SynthMode::FM) {
 		return false;
 	}
@@ -2134,6 +2142,9 @@ bool Sound::renderingOscillatorSyncCurrently(ParamManagerForTimeline* paramManag
 
 bool Sound::renderingOscillatorSyncEver(ParamManager* paramManager) {
 	if (!oscillatorSync) {
+		return false;
+	}
+	if (sources[1].oscType == OscType::STRING) {
 		return false;
 	}
 	if (synthMode == SynthMode::FM) {

@@ -28,13 +28,13 @@ def main():
     args = parse_args()
 
     if args.doc_output is not None:
-        with open(args.doc_output, "w") as outf:
+        with open(args.doc_output, "w", newline="\n") as outf:
             emitter = DocEmitter()
             result = [menu.visit(emitter) for menu in top_level_menus]
             outf.write(json.dumps(result))
 
     if args.cpp_output is not None:
-        with open(args.cpp_output, "w") as outf:
+        with open(args.cpp_output, "w", newline="\n") as outf:
             emitter = CppEmitter(outf)
             for menu in top_level_menus:
                 menu.visit(emitter)

@@ -1,0 +1,58 @@
+---
+title: String Oscillator
+---
+
+The String oscillator is a physical model of a plucked or excited string. It is available on **OSC2** in
+**Subtractive** mode once **SETTINGS > COMMUNITY FEATURES > Physical Modelling Oscillators** is on.
+
+## How it works
+
+OSC1 and NOISE are not heard directly. Together they are the *exciter*: the pick, bow or breath that sets the
+string vibrating. **ENV2** shapes the exciter and **ENV1** shapes the output, as usual.
+
+- **Pluck:** OSC1 level 0, NOISE up, and ENV2 with attack, decay, sustain and release all at 0. The exciter is then a
+  burst of a few milliseconds, like a pick. Keep ENV2 decay at 0 (or 1): even small decay values keep the exciter
+  going for a tenth of a second or more, which drives the string rather than plucking it, and the result sounds
+  dark, loud and bowed. Unison 1 sounds most like a single string; a little HPF tames the low thump of the pluck.
+- **Pluck with character:** as above, but OSC1 on a wavetable instead of NOISE. The wavetable's shape becomes the
+  pick (see the PHYS_DNA wavetable below).
+- **Bowed / sustained:** a quiet OSC1 saw with ENV2 sustain up.
+- **Resonator:** OSC1 set to an audio input (In L / In R) and long sustain. The strings ring with your voice or
+  instrument.
+
+## Presets and the PHYS_DNA wavetable
+
+The firmware repository has String presets in `contrib/sd_card/SYNTHS/STRING/`; copy the folder to the card's
+`SYNTHS/`:
+
+- **PLUCK NOISE**: a plucked string excited by a noise burst.
+- **PLUCK DNA**: the same string picked with the PHYS_DNA wavetable. OSC1's WAVETBL knob picks the pick: felt,
+  hammer, plectrum or quill.
+
+PLUCK DNA needs `SAMPLES/_WAVTBL/PHYS_DNA.WAV` on the card. Make it with
+`python scripts/util/generate_phys_dna.py PHYS_DNA.WAV` and copy it there.
+
+Note: a new synth has OSC2 level at 0, so turn OSC2 LEVEL up after choosing String. In the default synth patch ENV2
+also has full sustain, so a fresh String drones until you shorten ENV2.
+
+## Controls (OSC2 column)
+
+| Pad | String meaning |
+| --- | --- |
+| WAVETBL | **Brightness**: dark (nylon, felt) to bright (steel) |
+| FEEDBACK | **Sustain**: from about 50 ms to about 30 s; higher notes decay a little faster, as on real strings |
+| PW | **Pluck position**: near the bridge (thin, bright) to mid-string (hollow) |
+| XPOSE | Tuning, as for any oscillator |
+| LEVEL | Output level |
+
+OSC SYNC and RETRIGGER PHASE don't apply to the String oscillator. Brightness, Sustain and Pluck position can be
+modulated with patch cables, gold-knob custom slots, automation and MPE.
+
+Playing harder makes the pluck brighter. Each voice (and each unison part) is its own string. In mono and legato
+modes a new note keeps the string vibrating; in legato the string glides to the new pitch.
+
+## Limits
+
+- The lowest playable pitch is 20 Hz; deeper bends stop there.
+- Notes above about 10 kHz are silent.
+- Each sounding string uses about 13 KB of memory.

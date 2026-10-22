@@ -17,6 +17,7 @@
 #pragma once
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/formatted_title.h"
+#include "gui/menu_item/osc/string_osc.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
@@ -87,6 +88,9 @@ public:
 		Source& source = sound->sources[source_id_];
 
 		if (for_modulator_ && sound->getSynthMode() != SynthMode::FM) {
+			return false;
+		}
+		if (!for_modulator_ && isStringOsc(*sound, source_id_)) {
 			return false;
 		}
 		if (source.oscType == OscType::WAVETABLE) {

@@ -18,16 +18,21 @@
 #include "model/voice/voice_unison_part_source.h"
 #include "dsp/dx/dx7note.h"
 #include "dsp/dx/engine.h"
+#include "dsp/waveguide/karplus_string.hpp"
+#include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sample/sample_cache.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "model/voice/voice.h"
 #include "model/voice/voice_sample.h"
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/live/live_pitch_shifter.h"
+#include "processing/sound/sound.h"
 #include "processing/source.h"
 #include "storage/multi_range/multisample_range.h"
+#include <new>
 
 VoiceUnisonPartSource::~VoiceUnisonPartSource() {
 	unassign(false);
@@ -80,6 +85,25 @@ bool VoiceUnisonPartSource::noteOn(Voice* voice, Source* source, VoiceSamplePlay
 		DxPatch* patch = source->ensureDxPatch();
 		dxVoice->init(*patch, voice->noteCodeAfterArpeggiation, velocity);
 	}
+	else if (synthMode == SynthMode::SUBTRACTIVE && source->oscType == OscType::STRING) [[unlikely]] {
+		if (!runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::PhysicalModellingOscillators)) {
+			return true; // Silent while the feature is off
+		}
+		if (source != &voice->sound.sources[1]) {
+			return true; // Only OSC2 renders a string; do not allocate for a hand-edited OSC1
+		}
+		// Mono voice reuse unassigns with keepStrings, so the string is still here and keeps ringing: the new
+		// excitation adds to it. (Legato never calls noteOn.)
+		if (karplusString == nullptr) {
+			void* memory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(deluge::dsp::waveguide::KarplusString));
+			if (memory == nullptr) {
+				D_PRINTLN("string alloc failed");
+				return true; // Leave just this unison part silent
+			}
+			karplusString = new (memory) deluge::dsp::waveguide::KarplusString();
+			karplusString->reset();
+		}
+	}
 	else {
 		if (oscRetriggerPhase != 0xFFFFFFFF) {
 			oscPos = getOscInitialPhaseForZero(source->oscType) + oscRetriggerPhase;
@@ -93,7 +117,7 @@ bool VoiceUnisonPartSource::noteOn(Voice* voice, Source* source, VoiceSamplePlay
 	return true;
 }
 
-void VoiceUnisonPartSource::unassign(bool deletingSong) {
+void VoiceUnisonPartSource::unassign(bool deletingSong, bool keepString) {
 	active = false;
 	if (voiceSample != nullptr) {
 		voiceSample->beenUnassigned(deletingSong);
@@ -110,6 +134,12 @@ void VoiceUnisonPartSource::unassign(bool deletingSong) {
 		livePitchShifter->~LivePitchShifter();
 		delugeDealloc(livePitchShifter);
 		livePitchShifter = nullptr;
+	}
+
+	if (karplusString != nullptr && !keepString) {
+		karplusString->~KarplusString();
+		delugeDealloc(karplusString);
+		karplusString = nullptr;
 	}
 }
 

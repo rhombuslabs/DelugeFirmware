@@ -19,6 +19,7 @@
 
 #include "definitions_cxx.hpp"
 #include "dsp/filter/filter_set.h"
+#include "dsp/waveguide/karplus_string.hpp"
 #include "model/voice/voice_sample_playback_guide.h"
 #include "model/voice/voice_unison_part.h"
 #include "modulation/envelope.h"
@@ -77,6 +78,9 @@ public:
 
 	int32_t overallOscAmplitudeLastTime;
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;
+	int32_t stringExciterGainLastTime = 0; ///< ENV2 gain on the STRING exciter at the end of the last block
+	/// Conditions the STRING exciter once per voice; every unison part's string then uses the result
+	deluge::dsp::waveguide::StringExciter stringExciter;
 	std::array<int32_t, kNumModulators> modulatorAmplitudeLastTime;
 	std::array<uint32_t, kNumSources> sourceWaveIndexesLastTime;
 
@@ -107,7 +111,7 @@ public:
 	void changeNoteCode(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBeforeArpeggiation,
 	                    int32_t newNoteCodeAfterArpeggiation, int32_t newInputMIDIChannel, const int16_t* newMPEValues);
 	bool hasReleaseStage();
-	void unassignStuff(bool deletingSong);
+	void unassignStuff(bool deletingSong, bool keepStrings = false);
 	[[nodiscard]] uint32_t getPriorityRating() const;
 	void expressionEventImmediate(const Sound& sound, int32_t voiceLevelValue, int32_t s);
 	void expressionEventSmooth(int32_t newValue, int32_t s);
@@ -144,7 +148,12 @@ private:
 	                       int32_t numSamples, bool stereoBuffer, int32_t sourceAmplitude,
 	                       bool* unisonPartBecameInactive, int32_t overallPitchAdjust, bool doOscSync,
 	                       uint32_t* oscSyncPos, uint32_t* oscSyncPhaseIncrements, int32_t amplitudeIncrement,
-	                       uint32_t* getPhaseIncrements, bool getOutAfterPhaseIncrements, int32_t waveIndexIncrement);
+	                       uint32_t* getPhaseIncrements, bool getOutAfterPhaseIncrements, int32_t waveIndexIncrement,
+	                       int32_t numUnisonPartsToRender = -1);
+	static bool rendersStringOsc(const Sound& sound);
+	void renderStringSource(Sound& sound, const int32_t* conditionedExciter, int32_t* oscBuffer, int32_t numSamples,
+	                        bool stereoUnison, int32_t sourceAmplitude, int32_t amplitudeIncrement,
+	                        int32_t overallPitchAdjust);
 	static bool adjustPitch(uint32_t& phaseIncrement, int32_t adjustment);
 
 	void renderSineWaveWithFeedback(int32_t* thisSample, int32_t numSamples, uint32_t* phase, int32_t amplitude,

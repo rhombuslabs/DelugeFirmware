@@ -208,6 +208,9 @@ void RuntimeFeatureSettings::init() {
 	// Shortcut Overlay
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ShortcutOverlay],
 	                  STRING_FOR_COMMUNITY_FEATURE_SHORTCUT_OVERLAY, "shortcutOverlay", RuntimeFeatureStateToggle::On);
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::PhysicalModellingOscillators],
+	                  STRING_FOR_COMMUNITY_FEATURE_PHYSICAL_MODELLING, "physicalModellingOscillators",
+	                  RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::factoryReset(bool showPopup) {

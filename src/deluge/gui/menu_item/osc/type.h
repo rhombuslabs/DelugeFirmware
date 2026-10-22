@@ -17,9 +17,11 @@
 #pragma once
 #include "definitions_cxx.hpp"
 #include "gui/menu_item/formatted_title.h"
+#include "gui/menu_item/osc/osc_type_options.h"
 #include "gui/menu_item/selection.h"
 #include "gui/menu_item/submenu.h"
 #include "gui/ui/sound_editor.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "processing/engines/audio_engine.h"
 #include "processing/sound/sound.h"
@@ -27,6 +29,8 @@
 #include "util/comparison.h"
 
 #include <hid/display/oled.h>
+
+#include <algorithm>
 
 extern gui::menu_item::Submenu dxMenu;
 
@@ -37,21 +41,26 @@ public:
 	    : Selection(name), FormattedTitle(title_format_str, source_id + 1), sourceId_{source_id} {};
 	void beginSession(MenuItem* navigatedBackwardFrom) override { Selection::beginSession(navigatedBackwardFrom); }
 
-	bool mayUseDx() const { return !soundEditor.editingKit() && sourceId_ == 0; }
+	[[nodiscard]] OscTypeOptionList options() const {
+		Sound* sound = soundEditor.currentSound;
+		return availableOscTypes({
+		    .sourceId = sourceId_,
+		    .editingKit = soundEditor.editingKit(),
+		    .synthMode = sound->getSynthMode(),
+		    .inputsPluggedIn = AudioEngine::micPluggedIn || AudioEngine::lineInPluggedIn,
+		    .stringFeatureOn = runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::PhysicalModellingOscillators),
+		    .currentType = sound->sources[sourceId_].oscType,
+		});
+	}
 
 	void readCurrentValue() override {
-		int32_t rawVal = static_cast<int32_t>(soundEditor.currentSound->sources[sourceId_].oscType);
-		if (!mayUseDx() && rawVal > static_cast<int32_t>(OscType::DX7)) {
-			rawVal -= 1;
-		}
-		setValue(rawVal);
+		setValue(static_cast<int32_t>(indexOfOscType(options(), soundEditor.currentSound->sources[sourceId_].oscType)));
 	}
+
 	void writeCurrentValue() override {
 		OscType oldValue = soundEditor.currentSound->sources[sourceId_].oscType;
-		auto newValue = getValue<OscType>();
-		if (!mayUseDx() && static_cast<int32_t>(newValue) >= static_cast<int32_t>(OscType::DX7)) {
-			newValue = static_cast<OscType>(static_cast<int32_t>(newValue) + 1);
-		}
+		const OscTypeOptionList available = options();
+		const OscType newValue = available.types[std::min<size_t>(getValue(), available.count - 1)];
 
 		const auto needs_unassignment = {
 		    OscType::INPUT_L,
@@ -59,6 +68,7 @@ public:
 		    OscType::INPUT_STEREO,
 		    OscType::SAMPLE,
 		    OscType::DX7,
+		    OscType::STRING,
 
 		    // Haven't actually really determined if this needs to be here - maybe not?
 		    OscType::WAVETABLE,
@@ -70,7 +80,8 @@ public:
 
 		soundEditor.currentSound->sources[sourceId_].setOscType(newValue);
 
-		if (oldValue == OscType::SQUARE || newValue == OscType::SQUARE) {
+		if (oldValue == OscType::SQUARE || newValue == OscType::SQUARE || oldValue == OscType::STRING
+		    || newValue == OscType::STRING) {
 			soundEditor.currentSound->setupPatchingForAllParamManagers(currentSong);
 		}
 	}
@@ -80,36 +91,43 @@ public:
 	deluge::vector<std::string_view> getOptions(OptType optType) override {
 		(void)optType;
 		using enum l10n::String;
-		deluge::vector options = {
-		    l10n::getView(STRING_FOR_SINE),          //<
-		    l10n::getView(STRING_FOR_TRIANGLE),      //<
-		    l10n::getView(STRING_FOR_SQUARE),        //<
-		    l10n::getView(STRING_FOR_ANALOG_SQUARE), //<
-		    l10n::getView(STRING_FOR_SAW),           //<
-		    l10n::getView(STRING_FOR_ANALOG_SAW),    //<
-		    l10n::getView(STRING_FOR_WAVETABLE),     //<
-		};
-
-		if (soundEditor.currentSound->getSynthMode() == SynthMode::RINGMOD) {
-			return options;
+		const bool inputsPluggedIn = AudioEngine::micPluggedIn || AudioEngine::lineInPluggedIn;
+		const OscTypeOptionList available = options();
+		deluge::vector<std::string_view> names;
+		for (size_t i = 0; i < available.count; ++i) {
+			names.emplace_back(l10n::getView([&] {
+				switch (available.types[i]) {
+				case OscType::SINE:
+					return STRING_FOR_SINE;
+				case OscType::TRIANGLE:
+					return STRING_FOR_TRIANGLE;
+				case OscType::SQUARE:
+					return STRING_FOR_SQUARE;
+				case OscType::ANALOG_SQUARE:
+					return STRING_FOR_ANALOG_SQUARE;
+				case OscType::SAW:
+					return STRING_FOR_SAW;
+				case OscType::ANALOG_SAW_2:
+					return STRING_FOR_ANALOG_SAW;
+				case OscType::WAVETABLE:
+					return STRING_FOR_WAVETABLE;
+				case OscType::SAMPLE:
+					return STRING_FOR_SAMPLE;
+				case OscType::DX7:
+					return STRING_FOR_DX7;
+				case OscType::INPUT_L:
+					return inputsPluggedIn ? STRING_FOR_INPUT_LEFT : STRING_FOR_INPUT;
+				case OscType::INPUT_R:
+					return STRING_FOR_INPUT_RIGHT;
+				case OscType::INPUT_STEREO:
+					return STRING_FOR_INPUT_STEREO;
+				case OscType::STRING:
+					return STRING_FOR_STRING_OSC;
+				}
+				return STRING_FOR_SINE;
+			}()));
 		}
-
-		options.emplace_back(l10n::getView(STRING_FOR_SAMPLE));
-
-		if (mayUseDx()) {
-			options.emplace_back(l10n::getView(STRING_FOR_DX7));
-		}
-
-		if (AudioEngine::micPluggedIn || AudioEngine::lineInPluggedIn) {
-			options.emplace_back(l10n::getView(STRING_FOR_INPUT_LEFT));
-			options.emplace_back(l10n::getView(STRING_FOR_INPUT_RIGHT));
-			options.emplace_back(l10n::getView(STRING_FOR_INPUT_STEREO));
-		}
-		else {
-			options.emplace_back(l10n::getView(STRING_FOR_INPUT));
-		}
-
-		return options;
+		return names;
 	}
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) const override {
@@ -130,8 +148,10 @@ public:
 		oled_canvas::Canvas& image = OLED::main;
 
 		const OscType osc_type = soundEditor.currentSound->sources[sourceId_].oscType;
-		if (osc_type == OscType::DX7) {
-			const auto option = getOptions(OptType::FULL)[getValue()].data();
+		if (osc_type == OscType::DX7 || osc_type == OscType::STRING) {
+			// STRING's option index moves with input plug state, so don't index by getValue() for it
+			const auto option = osc_type == OscType::STRING ? l10n::getView(l10n::String::STRING_FOR_STRING_OSC).data()
+			                                                : getOptions(OptType::FULL)[getValue()].data();
 			return image.drawStringCentered(option, slot.start_x, slot.start_y + kHorizontalMenuSlotYOffset + 5,
 			                                kTextTitleSpacingX, kTextTitleSizeY, slot.width);
 		}

@@ -172,6 +172,7 @@ public:
 	virtual ArpeggiatorSettings* getArpSettings(InstrumentClip* clip = nullptr) = 0;
 	virtual void setSkippingRendering(bool newSkipping);
 
+	bool isSound() const override { return true; }
 	ModFXType getModFXType() override;
 	bool setModFXType(ModFXType newType) final;
 
@@ -226,6 +227,16 @@ public:
 	                           int32_t newNoteCodeAfterArpeggiation, int32_t velocity, int16_t const* mpeValues,
 	                           uint32_t sampleSyncLength, int32_t ticksLate, uint32_t samplesLate,
 	                           int32_t fromMIDIChannel = 16);
+	/// This sound renders a String on OSC2
+	[[nodiscard]] bool usesStringOsc() const;
+	/// The polyphony note-ons follow: with a String, AUTO plays as POLY and CHOKE as MONO, so a string is re-plucked
+	/// rather than cut
+	[[nodiscard]] PolyphonyMode effectivePolyphony() const;
+	/// Plays a note on a sounding voice, keeping its strings: they ring on, damped to `survival` (0..1), and the
+	/// envelopes restart from where they are. Frees the voice if the note-on fails.
+	void repluckVoice(ModelStackWithSoundFlags* modelStack, const ActiveVoice& voice, int32_t noteCodePreArp,
+	                  int32_t noteCodePostArp, int32_t velocity, int16_t const* mpeValues, uint32_t sampleSyncLength,
+	                  int32_t ticksLate, uint32_t samplesLate, int32_t fromMIDIChannel, float survival);
 	void polyphonicExpressionEventOnChannelOrNote(int32_t newValue, int32_t expressionDimension,
 	                                              int32_t channelOrNoteNumber,
 	                                              MIDICharacteristic whichCharacteristic) override;

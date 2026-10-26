@@ -22,10 +22,35 @@
 #include "model/mod_controllable/filters/filter_config.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/song/song.h"
+#include "processing/sound/sound.h"
 #include "util/container/enum_to_string_map.hpp"
 #include <cstring>
+#include <optional>
 
 namespace deluge::modulation::params {
+
+namespace {
+/// A STRING oscillator on OSC2 reuses three OSC2 params under its own names.
+std::optional<l10n::String> stringOscParamName(ParamType type, ModControllableAudio* modControllable) {
+	if (modControllable == nullptr || !modControllable->isSound()) {
+		return std::nullopt;
+	}
+	const Sound& sound = *static_cast<const Sound*>(modControllable);
+	if (sound.getSynthMode() != SynthMode::SUBTRACTIVE || sound.sources[1].oscType != OscType::STRING) {
+		return std::nullopt;
+	}
+	switch (type) {
+	case LOCAL_OSC_B_PHASE_WIDTH:
+		return l10n::String::STRING_FOR_STRING_PLUCK_POSITION;
+	case LOCAL_CARRIER_1_FEEDBACK:
+		return l10n::String::STRING_FOR_STRING_SUSTAIN;
+	case LOCAL_OSC_B_WAVE_INDEX:
+		return l10n::String::STRING_FOR_STRING_BRIGHTNESS;
+	default:
+		return std::nullopt;
+	}
+}
+} // namespace
 
 bool isParamBipolar(Kind kind, int32_t paramID) {
 	return (kind == Kind::PATCH_CABLE) || isParamPan(kind, paramID) || isParamPitch(kind, paramID)
@@ -181,6 +206,9 @@ char const* getPatchedParamShortName(ParamType type) {
 }
 
 char const* getPatchedParamShortName(ParamType type, ModControllableAudio* modControllable) {
+	if (auto name = stringOscParamName(type, modControllable)) {
+		return l10n::get(*name);
+	}
 	if (modControllable != nullptr) {
 		// See getParamDisplayName: the ladder filters rename morph after what it actually does.
 		if (type == LOCAL_LPF_MORPH
@@ -355,6 +383,12 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 
 char const* getParamDisplayName(Kind kind, int32_t p, ModControllableAudio* modControllable) {
 	using enum l10n::String;
+
+	if (kind == Kind::PATCHED) {
+		if (auto name = stringOscParamName(p, modControllable)) {
+			return l10n::get(*name);
+		}
+	}
 
 	if (modControllable != nullptr) {
 		bool isLPFMorph = (kind == Kind::PATCHED && p == LOCAL_LPF_MORPH)

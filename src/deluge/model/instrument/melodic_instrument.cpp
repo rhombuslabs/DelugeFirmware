@@ -30,6 +30,7 @@
 #include "modulation/arpeggiator.h"
 #include "playback/mode/session.h"
 #include "playback/playback_handler.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <ranges>
@@ -232,6 +233,14 @@ justAuditionNote:
 
 		// Note-off
 		else {
+			// Another note-on of this pitch is still held: the note goes on until its note-off
+			if (countsHeldNoteInstances(note)) {
+				auto held = notesAuditioned.find(note);
+				if (held != notesAuditioned.end() && held->second.heldCount > 1) {
+					held->second.heldCount--;
+					break;
+				}
+			}
 			if (runtimeFeatureSettings.get(RuntimeFeatureSettingType::HighlightIncomingNotes)
 			        == RuntimeFeatureStateToggle::On
 			    && instrumentClip == getCurrentInstrumentClip()) {
@@ -531,10 +540,16 @@ void MelodicInstrument::beginAuditioningForNote(ModelStack* modelStack, int32_t 
 	if (!activeClip) {
 		return;
 	}
+	bool alreadyHeld = false;
 	if (isNoteAuditioning(note)) {
-		//@todo this could definitely be handled better. Ideally we track both notes.
-		// if we don't do this then duplicate mpe notes get stuck
-		endAuditioningForNote(modelStack, note, 64);
+		if (countsHeldNoteInstances(note)) {
+			alreadyHeld = true; // Counted: the note-on goes to the sounding note (a String re-plucks it)
+		}
+		else {
+			//@todo this could definitely be handled better. Ideally we track both notes.
+			// if we don't do this then duplicate mpe notes get stuck
+			endAuditioningForNote(modelStack, note, 64);
+		}
 	}
 	ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(activeClip);
 	ModelStackWithNoteRow* modelStackWithNoteRow =
@@ -547,8 +562,11 @@ void MelodicInstrument::beginAuditioningForNote(ModelStack* modelStack, int32_t 
 	}
 
 	if (!activeClip || ((InstrumentClip*)activeClip)->allowNoteTails(modelStackWithNoteRow)) {
-		notesAuditioned[note] = {
+		EarlyNoteInfo& info = notesAuditioned[note];
+		const uint8_t heldCount = alreadyHeld ? std::min<uint8_t>(info.heldCount + 1, UINT8_MAX) : 1;
+		info = {
 		    .velocity = static_cast<uint8_t>(velocity),
+		    .heldCount = heldCount,
 		};
 	}
 
@@ -590,6 +608,12 @@ void MelodicInstrument::endAuditioningForNote(ModelStack* modelStack, int32_t no
 	        ->addOtherTwoThingsButNoNoteRow(toModControllable(), getParamManager(modelStack->song));
 
 	sendNote(modelStackWithThreeMainThings, false, note, nullptr, MIDI_CHANNEL_NONE, velocity);
+}
+
+void MelodicInstrument::forgetHeldNoteInstances() {
+	for (auto& [note, info] : notesAuditioned) {
+		info.heldCount = 1;
+	}
 }
 
 bool MelodicInstrument::isAnyAuditioningHappening() {

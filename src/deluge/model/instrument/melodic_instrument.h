@@ -68,6 +68,12 @@ public:
 	void beginAuditioningForNote(ModelStack* modelStack, int32_t note, int32_t velocity, int16_t const* mpeValues,
 	                             int32_t fromMIDIChannel = MIDI_CHANNEL_NONE, uint32_t sampleSyncLength = 0);
 	void endAuditioningForNote(ModelStack* modelStack, int32_t note, int32_t velocity = kDefaultLiftValue);
+	/// Whether overlapping note-ons of `note` are counted, so the note ends only with the last note-off rather than
+	/// the first (a String re-plucks one string per pitch, which an earlier finger's note-off mustn't end). False
+	/// once the note no longer sounds, so a count can't outlive its note.
+	[[nodiscard]] virtual bool countsHeldNoteInstances(int32_t note) const { return false; }
+	/// Forgets overlapping note-ons, so the next note-off of each pitch ends it (all notes off)
+	void forgetHeldNoteInstances();
 	virtual ModelStackWithAutoParam* getParamToControlFromInputMIDIChannel(int32_t cc,
 	                                                                       ModelStackWithThreeMainThings* modelStack);
 	void processParamFromInputMIDIChannel(int32_t cc, int32_t newValue,
@@ -90,6 +96,7 @@ public:
 	struct EarlyNoteInfo {
 		uint8_t velocity;
 		bool still_active = false;
+		uint8_t heldCount = 1; ///< Overlapping note-ons of this pitch still held (see countsHeldNoteInstances)
 	};
 
 	deluge::fast_map<int16_t, EarlyNoteInfo> earlyNotes; // note value, velocity, still_active

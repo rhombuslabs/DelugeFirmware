@@ -54,6 +54,7 @@ public:
 
 	virtual uint8_t* getModKnobMode(); // Return NULL if different modes not supported
 	virtual bool isKit() { return false; }
+	virtual bool isSound() const { return false; }
 	virtual bool isSong() { return false; }
 	virtual bool isEditingComp() { return false; }
 	virtual bool valueChangedEnoughToMatter(int32_t old_value, int32_t new_value, deluge::modulation::params::Kind kind,

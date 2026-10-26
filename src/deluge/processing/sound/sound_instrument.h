@@ -33,6 +33,7 @@ public:
 	bool writeDataToFile(Serializer& writer, Clip* clipForSavingOutputOnly, Song* song) override;
 	Error readFromFile(Deserializer& reader, Song* song, Clip* clip, int32_t readAutomationUpToPos) override;
 	void cutAllSound() override;
+	[[nodiscard]] bool countsHeldNoteInstances(int32_t note) const override;
 	bool noteIsOn(int32_t noteCode, bool resetTimeEntered);
 
 	void renderOutput(ModelStack* modelStack, std::span<StereoSample> buffer, int32_t* reverbBuffer,

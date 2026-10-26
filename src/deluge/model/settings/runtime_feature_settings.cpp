@@ -217,6 +217,9 @@ void RuntimeFeatureSettings::init() {
 	    {l10n::getView(STRING_FOR_SHORTCUT_OVERLAY_MENU_AND_CLIP),
 	     static_cast<uint32_t>(RuntimeFeatureStateShortcutOverlay::MenuAndClip)},
 	};
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::PhysicalModellingOscillators],
+	                  STRING_FOR_COMMUNITY_FEATURE_PHYSICAL_MODELLING, "physicalModellingOscillators",
+	                  RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::factoryReset(bool showPopup) {

@@ -715,6 +715,9 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::DX7:
 		return "dx7";
 
+	case OscType::STRING:
+		return "string";
+
 	default:
 		__builtin_unreachable();
 	}
@@ -754,6 +757,9 @@ OscType stringToOscType(char const* string) {
 	}
 	else if (!strcmp(string, "dx7")) {
 		return OscType::DX7;
+	}
+	else if (!strcmp(string, "string")) {
+		return OscType::STRING;
 	}
 	else {
 		return OscType::TRIANGLE;

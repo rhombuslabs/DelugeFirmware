@@ -1,0 +1,83 @@
+---
+title: String Oscillator
+---
+
+The String oscillator is a physical model of a plucked or excited string. It is available on **OSC2** in
+**Subtractive** mode once **SETTINGS > COMMUNITY FEATURES > Physical Modelling Oscillators** is on.
+
+## How it works
+
+OSC1 and NOISE are not heard directly. Together they are the *exciter*: the pick, bow or breath that sets the
+string vibrating. **ENV2** shapes the exciter and **ENV1** shapes the output, as usual.
+
+- **Pluck:** OSC1 level 0, NOISE up, and ENV2 with attack, decay, sustain and release all at 0. The exciter is then a
+  burst of a few milliseconds, like a pick. Keep ENV2 decay at 0 (or 1): even small decay values keep the exciter
+  going for a tenth of a second or more, which drives the string rather than plucking it, and the result sounds
+  dark, loud and bowed. Unison 1 sounds most like a single string; a little HPF tames the low thump of the pluck.
+- **Pluck with character:** as above, but OSC1 on a wavetable instead of NOISE. The wavetable's shape becomes the
+  pick: with the PLUCK wavetable (below), OSC1's WAVETBL knob goes from a soft fingertip (0) to a hard pick (50).
+  A velocity → OSC1 WAVETBL cable makes harder playing sound more like a pick, as on a real guitar.
+- **Bowed / sustained:** a quiet OSC1 saw with ENV2 sustain up.
+- **Resonator:** OSC1 set to an audio input (In L / In R) and long sustain. The strings ring with your voice or
+  instrument.
+
+## Presets and the PLUCK wavetable
+
+The firmware repository has String presets in `contrib/sd_card/SYNTHS/_STRING/`; copy the folder to the card's
+`SYNTHS/`:
+
+| Preset | Sound |
+| --- | --- |
+| PLUCK NOISE | A plucked string excited by a noise burst |
+| NYLON | Classical guitar: fingertip pluck, dark string, plucked away from the bridge |
+| STEEL PICK | Steel-string acoustic with a pick: bright, plucked near the bridge, two slightly detuned strings |
+| HARP | Soft finger, long ring, plucked near mid-string for a hollow tone, with reverb |
+| FINGER BASS | Fingerstyle bass an octave down: warm and round; harder playing adds a click |
+| PALM MUTE | Palm-muted pick: short, dark and chunky |
+
+All but PLUCK NOISE need the PLUCK wavetable at `SAMPLES/_WAVTBL/PhysMod/PLUCK.WAV`. Make it with
+`python scripts/util/generate_pluck_wavetable.py PLUCK.WAV` and copy it there. Its 256 frames morph from a fingertip
+to a hard pick by narrowing a pulse at equal area, so the WAVETBL knob changes brightness, not loudness.
+
+`scripts/util/generate_mallet_wavetable.py` makes MALLET.WAV, a set of soft, struck shapes. On the String
+oscillator they give a dull, struck tone; they're meant for a future mallet model.
+
+Note: a new synth has OSC2 level at 0, so turn OSC2 LEVEL up after choosing String. In the default synth patch ENV2
+also has full sustain, so a fresh String drones until you shorten ENV2.
+
+## Controls (OSC2 column)
+
+| Pad | String meaning |
+| --- | --- |
+| WAVETBL | **Brightness**: dark (nylon, felt) to bright (steel) |
+| FEEDBACK | **Sustain**: from about 50 ms to about 30 s; higher notes decay a little faster, as on real strings |
+| PW | **Pluck position**: near the bridge (thin, bright) to mid-string (hollow) |
+| XPOSE | Tuning, as for any oscillator |
+| LEVEL | Output level |
+
+OSC SYNC and RETRIGGER PHASE don't apply to the String oscillator. Brightness, Sustain and Pluck position can be
+modulated with patch cables, gold-knob custom slots, automation and MPE.
+
+Playing harder makes the pluck brighter. Each voice (and each unison part) is its own string.
+
+## Repeated notes
+
+A note on a string that's still ringing re-plucks it, as a finger or pick would: it damps the string first, then
+plucks it again.
+
+- **Poly**: each pitch has one string. Repeating a pitch re-plucks its string, even while it's releasing, and leaves
+  about a fifth of the old ring under the new pluck. Harder playing damps more, softer playing less.
+- **Mono**: one string. A repeated pitch is re-plucked the same way; a new pitch mutes the old one fully first.
+- **Legato**: a repeated pitch is re-plucked; a new pitch glides the ringing string, as before.
+- **Voice limit**: in Poly, once all voices are sounding, a new note takes over the least important ringing string
+  (muting it) instead of cutting a voice off.
+- **Overlapping notes**: when the same pitch is held twice, for example on two LinnStrument rows, the string sounds
+  until the last of them is released.
+
+In a kit row, Auto plays like Poly and Choke like Mono. Choke between kit rows works as before.
+
+## Limits
+
+- The lowest playable pitch is 20 Hz; deeper bends stop there.
+- Notes above about 10 kHz are silent.
+- Each sounding string uses about 13 KB of memory.

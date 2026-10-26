@@ -52,6 +52,15 @@ extern "C" {
 using namespace deluge;
 using namespace gui;
 
+namespace {
+/// All notes off arrives here as one note-off per pitch: let each end its note even if it was held twice
+void forgetHeldNoteInstances(Clip* clip) {
+	if (clip != nullptr && clip->type == ClipType::INSTRUMENT && clip->output->type != OutputType::KIT) {
+		static_cast<MelodicInstrument*>(clip->output)->forgetHeldNoteInstances();
+	}
+}
+} // namespace
+
 #define SETTINGS_FOLDER "SETTINGS"
 #define MIDI_FOLLOW_XML "SETTINGS/MIDIFollow.XML"
 #define MIDI_DEFAULTS_TAG "defaults"
@@ -789,6 +798,9 @@ Output* MidiFollow::noteMessageReceivedForSelectedOrActiveClip(MIDICable& cable,
 		// all notes off
 		else if (note == ALL_NOTES_OFF) {
 			for (int32_t i = 0; i <= 127; i++) {
+				forgetHeldNoteInstances(clipForLastNoteReceived[i]);
+			}
+			for (int32_t i = 0; i <= 127; i++) {
 				if (clipForLastNoteReceived[i]) {
 					selected_track = sendNoteToClip(cable, clipForLastNoteReceived[i], match, on, channel, i, velocity,
 					                                doingMidiThru, shouldRecordNotesNowNow, modelStack);
@@ -816,6 +828,7 @@ void MidiFollow::noteMessageReceivedForSpecificTrack(MIDICable& cable, bool on, 
 		}
 		// all notes off
 		else if (note == ALL_NOTES_OFF) {
+			forgetHeldNoteInstances(clip);
 			for (int32_t i = 0; i <= 127; i++) {
 				sendNoteToClip(cable, clip, match, on, channel, i, velocity, doingMidiThru, shouldRecordNotesNowNow,
 				               modelStack, false);
@@ -859,10 +872,12 @@ Output* MidiFollow::sendNoteToClip(MIDICable& cable, Clip* clip, MIDIMatchType m
 				if (on) {
 					clipForLastNoteReceived[note] = clip;
 				}
-				else {
-					if (note >= 0 && note <= 127) {
-						clipForLastNoteReceived[note] = nullptr;
-					}
+				// Keep routing note-offs here while the instrument still holds the note: a String sound counts
+				// overlapping note-ons of a pitch, and only the last note-off ends it
+				else if (note >= 0 && note <= 127
+				         && (clip->output->type == OutputType::KIT
+				             || !static_cast<MelodicInstrument*>(clip->output)->isNoteAuditioning(note))) {
+					clipForLastNoteReceived[note] = nullptr;
 				}
 			}
 		}

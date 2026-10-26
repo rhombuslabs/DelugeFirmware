@@ -18,6 +18,7 @@
 #include "processing/sound/sound.h"
 #include "definitions_cxx.hpp"
 #include "dsp/dx/engine.h"
+#include "dsp/waveguide/string_param_mapping.hpp"
 #include "gui/l10n/l10n.h"
 #include "gui/ui/root_ui.h"
 #include "gui/ui/sound_editor.h"
@@ -1402,6 +1403,11 @@ PatchCableAcceptance Sound::maySourcePatchToParam(PatchSource s, uint8_t p, Para
 		                                                                      : PatchCableAcceptance::EDITABLE;
 
 	case params::LOCAL_CARRIER_1_FEEDBACK:
+		// Sustain of the STRING oscillator on OSC2 reuses this param in Subtractive
+		if (synthMode == SynthMode::SUBTRACTIVE && sources[1].oscType == OscType::STRING) {
+			// Unlike FM feedback, Sustain at its minimum still sounds (shortest decay), so cables apply from 0 up
+			return isSourceActiveEver(1, paramManager) ? PatchCableAcceptance::ALLOWED : PatchCableAcceptance::EDITABLE;
+		}
 		if (synthMode != SynthMode::FM) {
 			return PatchCableAcceptance::DISALLOWED;
 		}
@@ -1609,13 +1615,41 @@ void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t 
 
 	auto* paramManager = static_cast<ParamManagerForTimeline*>(modelStack->paramManager);
 
+	// A String re-plucks a sounding string rather than stacking a new one. A repeat of a pitch damps it to `survival`
+	// first (more for harder playing); a new pitch on a reused string damps it fully
+	const bool stringOsc = usesStringOsc();
+	const PolyphonyMode polyphony = stringOsc ? effectivePolyphony() : polyphonic;
+	const float survival =
+	    stringOsc ? deluge::dsp::waveguide::repluckSurvival(deluge::dsp::waveguide::velocityToUnit(velocity)) : 0.f;
+
+	if (stringOsc && polyphony == PolyphonyMode::POLY) [[unlikely]] {
+		for (const ActiveVoice& voice : voices_) {
+			if (!voice->isCullFading() && voice->noteCodeAfterArpeggiation == noteCodePostArp) {
+				voiceToReuse = &voice;
+				break;
+			}
+		}
+		// At the voice limit, take over the lowest-priority ringing string rather than cutting it off and starting a
+		// fresh one. Cull-fading voices are already on their way out (see acquireVoice)
+		if (voiceToReuse == nullptr && std::ranges::count_if(voices_, [](const ActiveVoice& voice) {
+			                               return !voice->isCullFading();
+		                               }) >= maxVoiceCount) {
+			for (const ActiveVoice& voice : voices_) {
+				if (!voice->isCullFading()
+				    && (voiceToReuse == nullptr || (*voiceToReuse)->getPriorityRating() < voice->getPriorityRating())) {
+					voiceToReuse = &voice;
+				}
+			}
+		}
+	}
+
 	// If not polyphonic, stop any notes which are releasing, now
-	if (!voices_.empty() && polyphonic != PolyphonyMode::POLY) [[unlikely]] {
+	if (!voices_.empty() && polyphony != PolyphonyMode::POLY) [[unlikely]] {
 		for (auto it = voices_.begin(); it != voices_.end();) {
 			ActiveVoice& voice = *it;
 			// if it's not MONO, and the envelope is not in release and we're allowing note tails, this is a legato
 			// voice
-			if (polyphonic != PolyphonyMode::MONO && voice->envelopes[0].state < EnvelopeStage::RELEASE
+			if (polyphony != PolyphonyMode::MONO && voice->envelopes[0].state < EnvelopeStage::RELEASE
 			    && allowNoteTails(modelStack, true)) {
 				voiceForLegato = &voice;
 				break;
@@ -1639,15 +1673,26 @@ void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t 
 					it = voices_.erase(it);
 					continue; // `it` increment happened on the line above, immediately continue the loop
 				}
-				voice->unassignStuff(false);
+				voice->unassignStuff(false, true); // Keep STRING oscillators ringing into the next note
 				voiceToReuse = &voice;
 			}
 			it++;
 		}
 	}
 
-	if (polyphonic == PolyphonyMode::LEGATO && voiceForLegato) [[unlikely]] {
-		(*voiceForLegato)->changeNoteCode(modelStack, noteCodePreArp, noteCodePostArp, fromMIDIChannel, mpeValues);
+	if (polyphony == PolyphonyMode::LEGATO && voiceForLegato) [[unlikely]] {
+		if (stringOsc && (*voiceForLegato)->noteCodeAfterArpeggiation == noteCodePostArp) {
+			repluckVoice(modelStack, *voiceForLegato, noteCodePreArp, noteCodePostArp, velocity, mpeValues,
+			             sampleSyncLength, ticksLate, samplesLate, fromMIDIChannel, survival);
+		}
+		else {
+			(*voiceForLegato)->changeNoteCode(modelStack, noteCodePreArp, noteCodePostArp, fromMIDIChannel, mpeValues);
+		}
+	}
+	else if (stringOsc && voiceToReuse != nullptr) [[unlikely]] {
+		const bool samePitch = (*voiceToReuse)->noteCodeAfterArpeggiation == noteCodePostArp;
+		repluckVoice(modelStack, *voiceToReuse, noteCodePreArp, noteCodePostArp, velocity, mpeValues, sampleSyncLength,
+		             ticksLate, samplesLate, fromMIDIChannel, samePitch ? survival : 0.f);
 	}
 	else {
 		try {
@@ -1712,6 +1757,56 @@ void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t 
 		if (!allowNoteTails(modelStack, true)) {
 			midiEngine.sendNote(this, false, outputNoteCode, kDefaultNoteOffVelocity, outputMidiChannel, 0);
 		}
+	}
+}
+
+bool Sound::usesStringOsc() const {
+	return Voice::rendersStringOsc(*this);
+}
+
+PolyphonyMode Sound::effectivePolyphony() const {
+	if (usesStringOsc()) {
+		if (polyphonic == PolyphonyMode::AUTO) {
+			return PolyphonyMode::POLY;
+		}
+		if (polyphonic == PolyphonyMode::CHOKE) {
+			return PolyphonyMode::MONO;
+		}
+	}
+	return polyphonic;
+}
+
+void Sound::repluckVoice(ModelStackWithSoundFlags* modelStack, const ActiveVoice& voice, int32_t noteCodePreArp,
+                         int32_t noteCodePostArp, int32_t velocity, int16_t const* mpeValues, uint32_t sampleSyncLength,
+                         int32_t ticksLate, uint32_t samplesLate, int32_t fromMIDIChannel, float survival) {
+	voice->unassignStuff(false, true); // Keep the strings ringing into the next note
+	// The osc phases and stuff will remain
+	int32_t envelopePositions[kNumEnvelopes];
+	for (int32_t e = 0; e < kNumEnvelopes; e++) {
+		envelopePositions[e] = voice->envelopes[e].lastValue;
+	}
+
+	if (sideChainSendLevel != 0) [[unlikely]] {
+		AudioEngine::registerSideChainHit(sideChainSendLevel);
+	}
+
+	if (voice->noteOn(modelStack, noteCodePreArp, noteCodePostArp, velocity, sampleSyncLength, ticksLate, samplesLate,
+	                  false, fromMIDIChannel, mpeValues)) {
+		for (int32_t e = 0; e < kNumEnvelopes; e++) {
+			voice->envelopes[e].resumeAttack(envelopePositions[e]);
+		}
+		// With no attack, ENV1 jumps back to full rather than resuming: a ring heard quietly in release would come
+		// back louder, so damp it relative to how it is heard now (ENV1 shapes the volume as a parabola)
+		float heard = 1.f;
+		if (voice->envelopes[0].state != EnvelopeStage::ATTACK) {
+			const float level = static_cast<float>(std::max<int32_t>(envelopePositions[0], 0)) / 2147483648.f;
+			heard = level * level;
+		}
+		voice->repluckStrings(survival, heard);
+	}
+	else {
+		this->checkVoiceExists(voice, "E199");
+		this->freeActiveVoice(voice, modelStack);
 	}
 }
 
@@ -2125,6 +2220,9 @@ bool Sound::renderingOscillatorSyncCurrently(ParamManagerForTimeline* paramManag
 	if (!oscillatorSync) {
 		return false;
 	}
+	if (sources[1].oscType == OscType::STRING) {
+		return false;
+	}
 	if (synthMode == SynthMode::FM) {
 		return false;
 	}
@@ -2134,6 +2232,9 @@ bool Sound::renderingOscillatorSyncCurrently(ParamManagerForTimeline* paramManag
 
 bool Sound::renderingOscillatorSyncEver(ParamManager* paramManager) {
 	if (!oscillatorSync) {
+		return false;
+	}
+	if (sources[1].oscType == OscType::STRING) {
 		return false;
 	}
 	if (synthMode == SynthMode::FM) {

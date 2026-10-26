@@ -485,7 +485,7 @@ Error InstrumentClip::beginLinearRecording(ModelStackWithTimelineCounter* modelS
 			bool scaleAltered = false;
 
 			for (auto [note, noteInfo] : melodicInstrument->earlyNotes) {
-				const auto [velocity, still_active] = noteInfo;
+				const auto [velocity, still_active, heldCount] = noteInfo;
 
 				ModelStackWithNoteRow* modelStackWithNoteRow =
 				    getOrCreateNoteRowForYNote(note, modelStack, action, &scaleAltered);

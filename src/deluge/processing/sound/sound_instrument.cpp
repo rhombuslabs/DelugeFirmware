@@ -85,6 +85,16 @@ Error SoundInstrument::readFromFile(Deserializer& reader, Song* song, Clip* clip
 	return Sound::readFromFile(reader, modelStack, readAutomationUpToPos, &defaultArpSettings);
 }
 
+bool SoundInstrument::countsHeldNoteInstances(int32_t note) const {
+	if (!usesStringOsc()) {
+		return false;
+	}
+	return std::ranges::any_of(voices(), [note](const ActiveVoice& voice) {
+		return !voice->isCullFading()
+		       && voice->inputCharacteristics[util::to_underlying(MIDICharacteristic::NOTE)] == note;
+	});
+}
+
 void SoundInstrument::cutAllSound() {
 	Sound::killAllVoices();
 }

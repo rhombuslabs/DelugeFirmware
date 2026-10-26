@@ -17,6 +17,7 @@
 #pragma once
 #include "definitions_cxx.hpp"
 #include "gui/menu_item/formatted_title.h"
+#include "gui/menu_item/osc/string_osc.h"
 #include "gui/menu_item/source/patched_param.h"
 #include "modulation/params/param_set.h"
 #include "processing/sound/sound.h"
@@ -27,7 +28,14 @@ public:
 	PulseWidth(l10n::String name, l10n::String title_format_str, int32_t newP, uint8_t source_id)
 	    : PatchedParam(name, newP, source_id), FormattedTitle(title_format_str, source_id + 1) {}
 
-	[[nodiscard]] std::string_view getTitle() const override { return FormattedTitle::title(); }
+	[[nodiscard]] std::string_view getTitle() const override {
+		return isEditingStringOsc(source_id_) ? l10n::getView(l10n::String::STRING_FOR_STRING_PLUCK_POSITION)
+		                                      : FormattedTitle::title();
+	}
+	[[nodiscard]] std::string_view getName() const override {
+		return isEditingStringOsc(source_id_) ? l10n::getView(l10n::String::STRING_FOR_STRING_PLUCK_POSITION)
+		                                      : PatchedParam::getName();
+	}
 
 	int32_t getFinalValue() override { return computeFinalValueForHalfPrecisionMenuItem(this->getValue()); }
 

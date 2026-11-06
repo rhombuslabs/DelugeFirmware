@@ -23,7 +23,7 @@ jobs:
       run:
         working-directory: website
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
         with:
           # Recent-change generation scans main history and inspects each
           # commit's changed paths, so a shallow checkout is insufficient.
@@ -32,7 +32,7 @@ jobs:
         with:
           version: 10.24.0
           run_install: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: pnpm
@@ -75,7 +75,7 @@ jobs:
           SITE_BASE_PATH: ${{ steps.setup_pages.outputs.base_path }}
 
       - name: Upload PDF
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v5
         with:
           name: documentation-pdf
           path: website/dist/downloads/delugecommunity.com.pdf
@@ -83,7 +83,7 @@ jobs:
 
       # We upload the artifact for manual downloading and opening locally
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v5
         with:
           name: website-artifact
           path: website/dist

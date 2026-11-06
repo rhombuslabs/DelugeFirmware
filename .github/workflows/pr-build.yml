@@ -45,7 +45,7 @@ jobs:
           mkdir pr
           echo "$PR_NUMBER" > pr/number
           echo "$BASE_REF" > pr/base_ref
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v5
         with:
           name: pr-metadata
           path: pr/

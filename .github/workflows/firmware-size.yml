@@ -36,7 +36,7 @@ jobs:
     steps:
       # workflow_run checks out the default branch. Never check out the PR here:
       # this job can write to PRs. The PR build is only read as an ELF file.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 

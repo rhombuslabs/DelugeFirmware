@@ -25,8 +25,8 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install pyyaml
@@ -42,15 +42,15 @@ jobs:
     steps:
       # pull_request_target checks out the base branch by default. Never add `ref:` here:
       # this job has write permissions and must not run code from the PR.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/labeler@v7
+      - uses: actions/labeler@v5
         with:
           repo-token: ${{ github.token }}
           configuration-path: .github/labeler.yml
           sync-labels: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python .github/scripts/label_pr.py

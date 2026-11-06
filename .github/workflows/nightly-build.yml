@@ -12,7 +12,7 @@ jobs:
     outputs:
       new-commits: ${{ steps.count-commits.outputs.count }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Get new commits if branch exists
